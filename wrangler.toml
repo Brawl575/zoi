@@ -1,4 +1,4 @@
-name = "ty"
+name = "zoi"
 main = "index.js"
 compatibility_date = "2025-08-17"
 [env.production]
