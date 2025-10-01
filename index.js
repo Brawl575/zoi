@@ -1,10 +1,9 @@
-// ?
 import { createClient } from "@supabase/supabase-js";
 
 function normalizeMessage(msg) {
   return msg
     .toLowerCase()
-    .replace(/[^a-z0-9а-яё]/gi, ""); // оставляем только буквы/цифры
+    .replace(/[^a-z0-9а-яё]/gi, "");
 }
 
 const allowedColors = [6591981, 16711680];
@@ -18,6 +17,53 @@ const allowedFieldNames = [
   "📲 Join:",
 ];
 const blacklist = ["raided", "discord", "everyone", "lol", "raid", "fucked", "fuck"];
+
+// Validation functions
+function validateGeneration(value) {
+  // Формат: $xM/s, $xB/s, $xK/s, $x/s (может быть несколько через запятую)
+  const generations = value.split(',').map(g => g.trim());
+  const regex = /^\$[\d.]+[MBK]?\/s$/;
+  return generations.every(gen => regex.test(gen));
+}
+
+function validatePlayers(value) {
+  // Формат: x/8, где x <= 8
+  const match = value.match(/^(\d+)\/(\d+)$/);
+  if (!match) return false;
+  const current = parseInt(match[1]);
+  const max = parseInt(match[2]);
+  return max === 8 && current >= 0 && current <= 8;
+}
+
+function validateServerLink(value) {
+  // Формат: [Join Server](https://nameless-289z.onrender.com/join.html?placeId=...&jobId=...)
+  const regex = /^\[Join Server\]\(https:\/\/nameless-289z\.onrender\.com\/join\.html\?placeId=\d+&jobId=[a-f0-9-]+\)$/;
+  return regex.test(value);
+}
+
+function validateJobId(value) {
+  // Формат UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  const regex = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  return regex.test(value);
+}
+
+function validateJobIdPC(value) {
+  // Формат: ```xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx```
+  const regex = /^```[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}```$/;
+  return regex.test(value);
+}
+
+function validateJoinScript(value) {
+  // Формат: `game:GetService("TeleportService"):TeleportToPlaceInstance(...)`
+  const regex = /^`game:GetService\("TeleportService"\):TeleportToPlaceInstance\(\d+,"[a-f0-9-]+",game\.Players\.LocalPlayer\)`$/;
+  return regex.test(value);
+}
+
+function validateName(value) {
+  // Имена питомцев - не должны содержать подозрительные символы
+  const dangerous = /<|>|script|javascript|onerror|onclick|eval|function|alert/i;
+  return !dangerous.test(value) && value.length > 0 && value.length < 500;
+}
 
 export default {
   async fetch(request, env) {
@@ -136,7 +182,7 @@ export default {
       }
     }
 
-    // Проверка полей
+    // Проверка полей и их значений
     for (const field of embed.fields) {
       if (!allowedFieldNames.includes(field.name) || typeof field.value !== "string") {
         console.error(`Invalid field: ${field.name} from IP: ${clientIp}`, {
@@ -151,6 +197,47 @@ export default {
         console.error(`Invalid inline value in field: ${field.name} from IP: ${clientIp}`);
         return new Response(
           JSON.stringify({ error: `Invalid inline value in field: ${field.name}` }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // СТРОГАЯ ВАЛИДАЦИЯ КАЖДОГО ПОЛЯ
+      let isValid = true;
+      switch (field.name) {
+        case "🪙 Name:":
+          isValid = validateName(field.value);
+          break;
+        case "📈 Generation:":
+          isValid = validateGeneration(field.value);
+          break;
+        case "👥 Players:":
+          isValid = validatePlayers(field.value);
+          break;
+        case "🔗 Server Link:":
+          isValid = validateServerLink(field.value);
+          break;
+        case "📱 Job-ID (Mobile):":
+          isValid = validateJobId(field.value);
+          break;
+        case "💻 Job-ID (PC):":
+          isValid = validateJobIdPC(field.value);
+          break;
+        case "📲 Join:":
+          isValid = validateJoinScript(field.value);
+          break;
+      }
+
+      if (!isValid) {
+        console.error(`Invalid field format: ${field.name} from IP: ${clientIp}`, { value: field.value });
+        
+        // Бан на 1 день
+        const bannedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        await supabase
+          .from("bans")
+          .upsert([{ ip: clientIp, banned_until: bannedUntil }], { onConflict: "ip" });
+        
+        return new Response(
+          JSON.stringify({ error: "Invalid" }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
       }
