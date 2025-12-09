@@ -65,6 +65,45 @@ function validateName(value) {
   return !dangerous.test(value) && value.length > 0 && value.length < 500;
 }
 
+// Функция для парсинга generation и получения максимального значения в долларах
+function parseMaxGeneration(generationString) {
+  const generations = generationString.split(',').map(g => g.trim());
+  let maxValue = 0;
+  
+  for (const gen of generations) {
+    const match = gen.match(/^\$([\d.]+)([MBK]?)\/s$/);
+    if (match) {
+      let value = parseFloat(match[1]);
+      const unit = match[2];
+      
+      // Конвертируем все в доллары
+      if (unit === 'K') {
+        value *= 1000;
+      } else if (unit === 'M') {
+        value *= 1000000;
+      } else if (unit === 'B') {
+        value *= 1000000000;
+      }
+      
+      if (value > maxValue) {
+        maxValue = value;
+      }
+    }
+  }
+  
+  return maxValue;
+}
+
+// Функция для извлечения Job ID из полей
+function extractJobId(fields) {
+  for (const field of fields) {
+    if (field.name === "📱 Job-ID (Mobile):") {
+      return field.value;
+    }
+  }
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
@@ -182,6 +221,10 @@ export default {
       }
     }
 
+    // Извлекаем generation и job_id для дальнейшей проверки
+    let generationValue = null;
+    let jobId = null;
+
     // Проверка полей и их значений
     for (const field of embed.fields) {
       if (!allowedFieldNames.includes(field.name) || typeof field.value !== "string") {
@@ -199,6 +242,14 @@ export default {
           JSON.stringify({ error: `Invalid inline value in field: ${field.name}` }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
+      }
+
+      // Сохраняем generation и job_id
+      if (field.name === "📈 Generation:") {
+        generationValue = field.value;
+      }
+      if (field.name === "📱 Job-ID (Mobile):") {
+        jobId = field.value;
       }
 
       // СТРОГАЯ ВАЛИДАЦИЯ КАЖДОГО ПОЛЯ
@@ -240,6 +291,72 @@ export default {
           JSON.stringify({ error: "Invalid" }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
+      }
+    }
+
+    // НОВАЯ ПРОВЕРКА: проверка на злоупотребление высоким generation с одним job_id
+    if (generationValue && jobId) {
+      const maxGeneration = parseMaxGeneration(generationValue);
+      const threshold = 500000000; // $500M в долларах
+      
+      if (maxGeneration > threshold) {
+        console.log(`High generation detected: ${maxGeneration} (${generationValue}) for job_id: ${jobId} from IP: ${clientIp}`);
+        
+        // Проверяем последние 24 часа
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        
+        const { data: highGenMessages, error: highGenError } = await supabase
+          .from("high_generation_tracking")
+          .select("id, job_id, generation_value")
+          .eq("ip", clientIp)
+          .eq("job_id", jobId)
+          .gte("timestamp", twentyFourHoursAgo);
+        
+        if (highGenError) {
+          console.error(`High generation tracking query failed for IP: ${clientIp}`, {
+            error: highGenError.message,
+            code: highGenError.code,
+            details: highGenError.details,
+          });
+        } else {
+          // Считаем текущий запрос + существующие записи
+          const totalHighGenRequests = (highGenMessages?.length || 0) + 1;
+          
+          if (totalHighGenRequests >= 3) {
+            // Баним на 5 дней
+            const bannedUntil = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+            const { error: banInsertError } = await supabase
+              .from("bans")
+              .upsert([{ ip: clientIp, banned_until: bannedUntil }], { onConflict: "ip" });
+            
+            if (banInsertError) {
+              console.error(`Ban insert failed for high generation abuse IP: ${clientIp}`, {
+                error: banInsertError.message,
+                code: banInsertError.code,
+                details: banInsertError.details,
+              });
+            } else {
+              // Удаляем все записи трекинга для этого IP
+              await supabase.from("high_generation_tracking").delete().eq("ip", clientIp);
+              
+              console.warn(`IP ${clientIp} banned until ${bannedUntil} for high generation abuse (job_id: ${jobId})`);
+              return new Response(
+                JSON.stringify({ error: `IP banned for high generation abuse until ${bannedUntil}` }),
+                { status: 403, headers: { "Content-Type": "application/json" } }
+              );
+            }
+          }
+          
+          // Записываем текущий запрос в трекинг
+          await supabase
+            .from("high_generation_tracking")
+            .insert([{
+              ip: clientIp,
+              job_id: jobId,
+              generation_value: maxGeneration,
+              timestamp: new Date().toISOString()
+            }]);
+        }
       }
     }
 
@@ -332,7 +449,14 @@ export default {
       .from("messages")
       .delete()
       .lt("timestamp", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
-    console.log(`Cleaned old messages for IP: ${clientIp}`);
+    
+    // Очистка старых записей high_generation_tracking (>24 часа)
+    await supabase
+      .from("high_generation_tracking")
+      .delete()
+      .lt("timestamp", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    
+    console.log(`Cleaned old messages and tracking data for IP: ${clientIp}`);
 
     // Отправка в Discord
     const res = await fetch(env.DISCORD_WEBHOOK_URL, {
