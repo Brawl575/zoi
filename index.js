@@ -104,9 +104,37 @@ function extractJobId(fields) {
   return null;
 }
 
+function decryptData(base64Text, key) {
+  // Base64 decode
+  const binaryString = atob(base64Text);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  // Key bytes
+  const keyBytes = new Uint8Array(key.length);
+  for (let i = 0; i < key.length; i++) {
+    keyBytes[i] = key.charCodeAt(i);
+  }
+
+  // Decrypt
+  const decrypted = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    const keyIndex = i % keyBytes.length;
+    const temp = bytes[i] ^ keyBytes[keyIndex];
+    const decryptedByte = temp ^ (i % 256);
+    decrypted[i] = decryptedByte;
+  }
+
+  // Convert to string
+  return new TextDecoder().decode(decrypted);
+}
+
 export default {
   async fetch(request, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+    const SECRET_KEY = env.SECRET_KEY;
     const url = new URL(request.url);
     const clientIp = request.headers.get("cf-connecting-ip");
 
@@ -156,25 +184,18 @@ export default {
       });
     }
 
-    const ct = request.headers.get("content-type") || "";
-    if (!ct.includes("application/json")) {
-      console.error(`Invalid Content-Type: ${ct} from IP: ${clientIp}`);
-      return new Response(
-        JSON.stringify({ error: "Content-Type must be application/json" }),
-        { status: 415, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
     // Парсинг тела запроса
     let body;
     try {
-      body = await request.json();
+      const encryptedText = await request.text();
+      const decryptedJson = decryptData(encryptedText, SECRET_KEY);
+      body = JSON.parse(decryptedJson);
     } catch (error) {
-      console.error(`JSON parsing failed for IP: ${clientIp}`, {
+      console.error(`Decryption or JSON parsing failed for IP: ${clientIp}`, {
         error: error.message,
         stack: error.stack,
       });
-      return new Response(JSON.stringify({ error: "Invalid JSON", details: error.message }), {
+      return new Response(JSON.stringify({ error: "Invalid encrypted data or JSON", details: error.message }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
