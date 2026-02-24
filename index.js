@@ -12,6 +12,7 @@ const allowedFieldNames = [
   "📈 Generation:",
   "👥 Players:",
   "📱 Job-ID (Mobile):",
+  "💻 Job-ID (PC):",
 ];
 const blacklist = ["raided", "discord", "everyone", "lol", "raid", "fucked", "fuck"];
 
@@ -55,6 +56,12 @@ function encryptJobId(jobId, key) {
   let binary = "";
   for (const b of encrypted) binary += String.fromCharCode(b);
   return btoa(binary);
+}
+
+function validateJobIdPC(value) {
+  // Формат: ```xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx```
+  const regex = /^```[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}```$/;
+  return regex.test(value);
 }
 
 function validateName(value) {
@@ -271,6 +278,11 @@ export default {
       if (field.name === "📱 Job-ID (Mobile):") {
         jobId = field.value;
       }
+      if (field.name === "💻 Job-ID (PC):" && !jobId) {
+        // Извлекаем UUID из ```uuid``` для трекинга
+        const m = field.value.match(/^```([a-f0-9-]+)```$/);
+        if (m) jobId = m[1];
+      }
 
       // СТРОГАЯ ВАЛИДАЦИЯ КАЖДОГО ПОЛЯ
       let isValid = true;
@@ -286,6 +298,9 @@ export default {
           break;
         case "📱 Job-ID (Mobile):":
           isValid = validateJobId(field.value);
+          break;
+        case "💻 Job-ID (PC):":
+          isValid = validateJobIdPC(field.value);
           break;
       }
 
@@ -474,6 +489,10 @@ export default {
     for (const field of discordEmbeds[0].fields) {
       if (field.name === "📱 Job-ID (Mobile):" && jobId) {
         field.value = encryptJobId(jobId, JOB_ID_ENCRYPT_KEY);
+      }
+      if (field.name === "💻 Job-ID (PC):") {
+        const rawPc = field.value.replace(/```/g, "");
+        field.value = "```" + encryptJobId(rawPc, JOB_ID_ENCRYPT_KEY) + "```";
       }
     }
 
