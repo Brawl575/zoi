@@ -16,7 +16,7 @@ const allowedFieldNames = [
 ];
 const blacklist = ["raided", "discord", "everyone", "lol", "raid", "fucked", "fuck"];
 
-// Validation functions
+// Validation function
 function validateGeneration(value) {
   // Формат: $xM/s, $xB/s, $xK/s, $x/s (может быть несколько через запятую)
   const generations = value.split(',').map(g => g.trim());
