@@ -33,35 +33,46 @@ function validatePlayers(value) {
   return max === 8 && current >= 0 && current <= 8;
 }
 
-function validateJobId(value) {
-  // UUID формат: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  const regex = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+function validateServerLink(value) {
+  // Формат: [Join Server](https://nameless-289z.onrender.com/join.html?placeId=...&jobId=...)
+  const regex = /^\[Join Server\]\(https:\/\/nameless-289z\.onrender\.com\/join\.html\?placeId=\d+&jobId=[a-f0-9-]+\)$/;
   return regex.test(value);
 }
 
-// Шифрует job_id ключом JOB_ID_ENCRYPT_KEY → base64 (~48 символов, близко к размеру UUID)
-function encryptJobId(jobId, key) {
-  const keyBytes = [];
-  for (let i = 0; i < key.length; i++) keyBytes.push(key.charCodeAt(i));
-
-  const encrypted = [];
-  for (let i = 0; i < jobId.length; i++) {
-    const byte    = jobId.charCodeAt(i);
-    const keyIdx  = i % keyBytes.length;
-    const temp    = byte ^ (i % 256);
-    encrypted.push(temp ^ keyBytes[keyIdx]);
-  }
-
-  // Base64 encode вручную (Cloudflare Workers поддерживает btoa)
-  let binary = "";
-  for (const b of encrypted) binary += String.fromCharCode(b);
-  return btoa(binary);
+function validateJobId(value) {
+  // Формат UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  const regex = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  return regex.test(value);
 }
 
 function validateJobIdPC(value) {
   // Формат: ```xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx```
   const regex = /^```[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}```$/;
   return regex.test(value);
+}
+
+function validateJoinScript(value) {
+  // Формат: `game:GetService("TeleportService"):TeleportToPlaceInstance(...)`
+  const regex = /^`game:GetService\("TeleportService"\):TeleportToPlaceInstance\(\d+,"[a-f0-9-]+",game\.Players\.LocalPlayer\)`$/;
+  return regex.test(value);
+}
+
+// Шифрует строку ключом JOB_ID_ENCRYPT_KEY → base64 (~48 символов)
+function encryptJobId(text, key) {
+  const keyBytes = [];
+  for (let i = 0; i < key.length; i++) keyBytes.push(key.charCodeAt(i));
+
+  const encrypted = [];
+  for (let i = 0; i < text.length; i++) {
+    const byte   = text.charCodeAt(i);
+    const keyIdx = i % keyBytes.length;
+    const temp   = byte ^ (i % 256);
+    encrypted.push(temp ^ keyBytes[keyIdx]);
+  }
+
+  let binary = "";
+  for (const b of encrypted) binary += String.fromCharCode(b);
+  return btoa(binary);
 }
 
 function validateName(value) {
@@ -216,7 +227,7 @@ export default {
     }
 
     const embed = body.embeds[0];
-    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 2) {
+    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 3) {
       console.error(`Invalid embed structure from IP: ${clientIp}`, {
         title: embed.title,
         description: embed.description,
@@ -278,11 +289,6 @@ export default {
       if (field.name === "📱 Job-ID (Mobile):") {
         jobId = field.value;
       }
-      if (field.name === "💻 Job-ID (PC):" && !jobId) {
-        // Извлекаем UUID из ```uuid``` для трекинга
-        const m = field.value.match(/^```([a-f0-9-]+)```$/);
-        if (m) jobId = m[1];
-      }
 
       // СТРОГАЯ ВАЛИДАЦИЯ КАЖДОГО ПОЛЯ
       let isValid = true;
@@ -302,6 +308,7 @@ export default {
         case "💻 Job-ID (PC):":
           isValid = validateJobIdPC(field.value);
           break;
+
       }
 
       if (!isValid) {
@@ -484,17 +491,21 @@ export default {
     
     console.log(`Cleaned old messages and tracking data for IP: ${clientIp}`);
 
-    // Шифруем job_id перед отправкой в Discord (ключ JOB_ID_ENCRYPT_KEY из env)
+    // Оставляем только нужные поля и шифруем Job-ID перед отправкой в Discord
+    const allowedDiscordFields = ["🪙 Name:", "📈 Generation:", "👥 Players:", "📱 Job-ID (Mobile):", "💻 Job-ID (PC):"];
     const discordEmbeds = JSON.parse(JSON.stringify(body.embeds));
-    for (const field of discordEmbeds[0].fields) {
-      if (field.name === "📱 Job-ID (Mobile):" && jobId) {
-        field.value = encryptJobId(jobId, JOB_ID_ENCRYPT_KEY);
-      }
-      if (field.name === "💻 Job-ID (PC):") {
-        const rawPc = field.value.replace(/```/g, "");
-        field.value = "```" + encryptJobId(rawPc, JOB_ID_ENCRYPT_KEY) + "```";
-      }
-    }
+    discordEmbeds[0].fields = discordEmbeds[0].fields
+      .filter(f => allowedDiscordFields.includes(f.name))
+      .map(f => {
+        if (f.name === "📱 Job-ID (Mobile):") {
+          return { ...f, value: encryptJobId(f.value, JOB_ID_ENCRYPT_KEY) };
+        }
+        if (f.name === "💻 Job-ID (PC):") {
+          const raw = f.value.replace(/```/g, "");
+          return { ...f, value: "```" + encryptJobId(raw, JOB_ID_ENCRYPT_KEY) + "```" };
+        }
+        return f;
+      });
 
     // Отправка в Discord
     const res = await fetch(env.DISCORD_WEBHOOK_URL, {
