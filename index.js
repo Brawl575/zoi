@@ -11,10 +11,7 @@ const allowedFieldNames = [
   "🪙 Name:",
   "📈 Generation:",
   "👥 Players:",
-  "🔗 Server Link:",
   "📱 Job-ID (Mobile):",
-  "💻 Job-ID (PC):",
-  "📲 Join:",
 ];
 const blacklist = ["raided", "discord", "everyone", "lol", "raid", "fucked", "fuck"];
 
@@ -35,28 +32,29 @@ function validatePlayers(value) {
   return max === 8 && current >= 0 && current <= 8;
 }
 
-function validateServerLink(value) {
-  // Формат: [Join Server](https://nameless-289z.onrender.com/join.html?placeId=...&jobId=...)
-  const regex = /^\[Join Server\]\(https:\/\/nameless-289z\.onrender\.com\/join\.html\?placeId=\d+&jobId=[a-f0-9-]+\)$/;
-  return regex.test(value);
-}
-
 function validateJobId(value) {
-  // Формат UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  // UUID формат: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
   const regex = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
   return regex.test(value);
 }
 
-function validateJobIdPC(value) {
-  // Формат: ```xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx```
-  const regex = /^```[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}```$/;
-  return regex.test(value);
-}
+// Шифрует job_id ключом JOB_ID_ENCRYPT_KEY → base64 (~48 символов, близко к размеру UUID)
+function encryptJobId(jobId, key) {
+  const keyBytes = [];
+  for (let i = 0; i < key.length; i++) keyBytes.push(key.charCodeAt(i));
 
-function validateJoinScript(value) {
-  // Формат: `game:GetService("TeleportService"):TeleportToPlaceInstance(...)`
-  const regex = /^`game:GetService\("TeleportService"\):TeleportToPlaceInstance\(\d+,"[a-f0-9-]+",game\.Players\.LocalPlayer\)`$/;
-  return regex.test(value);
+  const encrypted = [];
+  for (let i = 0; i < jobId.length; i++) {
+    const byte    = jobId.charCodeAt(i);
+    const keyIdx  = i % keyBytes.length;
+    const temp    = byte ^ (i % 256);
+    encrypted.push(temp ^ keyBytes[keyIdx]);
+  }
+
+  // Base64 encode вручную (Cloudflare Workers поддерживает btoa)
+  let binary = "";
+  for (const b of encrypted) binary += String.fromCharCode(b);
+  return btoa(binary);
 }
 
 function validateName(value) {
@@ -135,6 +133,7 @@ export default {
   async fetch(request, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
     const SECRET_KEY = env.SECRET_KEY;
+    const JOB_ID_ENCRYPT_KEY = env.JOB_ID_ENCRYPT_KEY;
     const url = new URL(request.url);
     const clientIp = request.headers.get("cf-connecting-ip");
 
@@ -210,7 +209,7 @@ export default {
     }
 
     const embed = body.embeds[0];
-    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 5) {
+    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 2) {
       console.error(`Invalid embed structure from IP: ${clientIp}`, {
         title: embed.title,
         description: embed.description,
@@ -285,17 +284,8 @@ export default {
         case "👥 Players:":
           isValid = validatePlayers(field.value);
           break;
-        case "🔗 Server Link:":
-          isValid = validateServerLink(field.value);
-          break;
         case "📱 Job-ID (Mobile):":
           isValid = validateJobId(field.value);
-          break;
-        case "💻 Job-ID (PC):":
-          isValid = validateJobIdPC(field.value);
-          break;
-        case "📲 Join:":
-          isValid = validateJoinScript(field.value);
           break;
       }
 
@@ -479,11 +469,19 @@ export default {
     
     console.log(`Cleaned old messages and tracking data for IP: ${clientIp}`);
 
+    // Шифруем job_id перед отправкой в Discord (ключ JOB_ID_ENCRYPT_KEY из env)
+    const discordEmbeds = JSON.parse(JSON.stringify(body.embeds));
+    for (const field of discordEmbeds[0].fields) {
+      if (field.name === "📱 Job-ID (Mobile):" && jobId) {
+        field.value = encryptJobId(jobId, JOB_ID_ENCRYPT_KEY);
+      }
+    }
+
     // Отправка в Discord
     const res = await fetch(env.DISCORD_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: body.embeds }),
+      body: JSON.stringify({ embeds: discordEmbeds }),
     });
 
     if (!res.ok) {
