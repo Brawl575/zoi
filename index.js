@@ -11,8 +11,10 @@ const allowedFieldNames = [
   "🪙 Name:",
   "📈 Generation:",
   "👥 Players:",
+  "🔗 Server Link:",
   "📱 Job-ID (Mobile):",
   "💻 Job-ID (PC):",
+  "📲 Join:",
 ];
 const blacklist = ["raided", "discord", "everyone", "lol", "raid", "fucked", "fuck"];
 
@@ -55,24 +57,6 @@ function validateJoinScript(value) {
   // Формат: `game:GetService("TeleportService"):TeleportToPlaceInstance(...)`
   const regex = /^`game:GetService\("TeleportService"\):TeleportToPlaceInstance\(\d+,"[a-f0-9-]+",game\.Players\.LocalPlayer\)`$/;
   return regex.test(value);
-}
-
-// Шифрует строку ключом JOB_ID_ENCRYPT_KEY → base64 (~48 символов)
-function encryptJobId(text, key) {
-  const keyBytes = [];
-  for (let i = 0; i < key.length; i++) keyBytes.push(key.charCodeAt(i));
-
-  const encrypted = [];
-  for (let i = 0; i < text.length; i++) {
-    const byte   = text.charCodeAt(i);
-    const keyIdx = i % keyBytes.length;
-    const temp   = byte ^ (i % 256);
-    encrypted.push(temp ^ keyBytes[keyIdx]);
-  }
-
-  let binary = "";
-  for (const b of encrypted) binary += String.fromCharCode(b);
-  return btoa(binary);
 }
 
 function validateName(value) {
@@ -145,6 +129,28 @@ function decryptData(base64Text, key) {
 
   // Convert to string
   return new TextDecoder().decode(decrypted);
+}
+
+// Шифрует UUID ключом → результат тот же UUID-формат (36 символов, обратимо)
+function encryptJobId(uuid, key) {
+  const hexOnly = uuid.replace(/-/g, ""); // 32 hex-символа
+  const keyBytes = [];
+  for (let i = 0; i < key.length; i++) keyBytes.push(key.charCodeAt(i));
+
+  let result = "";
+  for (let i = 0; i < hexOnly.length; i++) {
+    const nibble     = parseInt(hexOnly[i], 16);
+    const keyNibble  = keyBytes[i % keyBytes.length] & 0x0f;
+    result += ((nibble ^ keyNibble) & 0x0f).toString(16);
+  }
+
+  return (
+    result.slice(0, 8)  + "-" +
+    result.slice(8, 12) + "-" +
+    result.slice(12, 16) + "-" +
+    result.slice(16, 20) + "-" +
+    result.slice(20, 32)
+  );
 }
 
 export default {
@@ -227,7 +233,7 @@ export default {
     }
 
     const embed = body.embeds[0];
-    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 3) {
+    if (!embed.title || !embed.description || !embed.fields || embed.fields.length < 5) {
       console.error(`Invalid embed structure from IP: ${clientIp}`, {
         title: embed.title,
         description: embed.description,
@@ -302,13 +308,18 @@ export default {
         case "👥 Players:":
           isValid = validatePlayers(field.value);
           break;
+        case "🔗 Server Link:":
+          isValid = validateServerLink(field.value);
+          break;
         case "📱 Job-ID (Mobile):":
           isValid = validateJobId(field.value);
           break;
         case "💻 Job-ID (PC):":
           isValid = validateJobIdPC(field.value);
           break;
-
+        case "📲 Join:":
+          isValid = validateJoinScript(field.value);
+          break;
       }
 
       if (!isValid) {
@@ -491,7 +502,7 @@ export default {
     
     console.log(`Cleaned old messages and tracking data for IP: ${clientIp}`);
 
-    // Оставляем только нужные поля и шифруем Job-ID перед отправкой в Discord
+    // Фильтруем поля — в Discord уходят только нужные, job ID зашифрованы
     const allowedDiscordFields = ["🪙 Name:", "📈 Generation:", "👥 Players:", "📱 Job-ID (Mobile):", "💻 Job-ID (PC):"];
     const discordEmbeds = JSON.parse(JSON.stringify(body.embeds));
     discordEmbeds[0].fields = discordEmbeds[0].fields
